@@ -1,15 +1,26 @@
 """
 E-commerce Review Intelligence System
-A premium AI-powered dashboard for customer review analysis.
+Integrates your exact notebook pipeline:
+  - clean_text()         from your preprocessing cell
+  - detect_fake_review() from your fake detection cell
+  - classify_issue()     from your multi-issue classification cell
+  - predict_review()     from your final prediction cell
+  - Loads sentiment_model.pkl + tfidf_vectorizer.pkl saved by your notebook
 """
 
 # ─────────────────────────────────────────────
-#  IMPORTS
+#  IMPORTS  (exactly as in your notebook)
 # ─────────────────────────────────────────────
 import streamlit as st
-import string
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import re
+import string
 import time
+import pickle
+import warnings
 import nltk
 import spacy
 
@@ -17,9 +28,12 @@ from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from wordcloud import WordCloud
+
+warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
-#  PAGE CONFIG  (must be first Streamlit call)
+#  PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="Review Intelligence · AI Dashboard",
@@ -29,197 +43,229 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-#  NLTK / SPACY SETUP
+#  NLTK / SPACY SETUP  (same as your notebook)
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_nlp_resources():
-    """Download NLTK data and load spaCy model once."""
     nltk.download("punkt",     quiet=True)
     nltk.download("punkt_tab", quiet=True)
     nltk.download("stopwords", quiet=True)
     nltk.download("wordnet",   quiet=True)
-    try:
-        nlp_model = spacy.load("en_core_web_sm")
-    except OSError:
-        import subprocess, sys
-        subprocess.run(
-            [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
-            check=True, capture_output=True,
-        )
-        nlp_model = spacy.load("en_core_web_sm")
+    # spaCy model is installed via requirements.txt on Streamlit Cloud
+    # no subprocess needed
+    nlp_model = spacy.load("en_core_web_sm")
     return nlp_model, set(stopwords.words("english"))
 
 nlp, stop_words = load_nlp_resources()
 
 # ─────────────────────────────────────────────
-#  TRAINING DATA
-# ─────────────────────────────────────────────
-TRAIN_REVIEWS = [
-    # ── POSITIVE ─────────────────────────────
-    ("I absolutely love this product it works perfectly and arrived quickly", "Positive"),
-    ("Amazing quality exceeded all my expectations will buy again", "Positive"),
-    ("Great packaging fast shipping very happy with the purchase", "Positive"),
-    ("Excellent customer service resolved my issue immediately", "Positive"),
-    ("Perfect fit beautiful design highly recommend to everyone", "Positive"),
-    ("The product is very good and I really liked it", "Positive"),
-    ("This is really good I loved it so much", "Positive"),
-    ("Very good product I am really happy with it", "Positive"),
-    ("I really liked this product it is very good", "Positive"),
-    ("Absolutely fantastic product highly recommend it to everyone", "Positive"),
-    ("Best purchase I have ever made incredibly satisfied", "Positive"),
-    ("Superb quality product arrived on time very impressed", "Positive"),
-    ("Outstanding performance exceeded every expectation I had", "Positive"),
-    ("Wonderful product works exactly as described love it", "Positive"),
-    ("Really happy with this purchase great value for money", "Positive"),
-    ("Brilliant product very well made and delivered fast", "Positive"),
-    ("I love this item it is exactly what I wanted", "Positive"),
-    ("Incredible quality so satisfied with this purchase", "Positive"),
-    ("Top quality product and excellent service very pleased", "Positive"),
-    ("Very satisfied with the product it works great", "Positive"),
-    ("Good product does exactly what it is supposed to do", "Positive"),
-    ("I am very happy with this item it is perfect", "Positive"),
-    ("Great product very pleased with the quality and delivery", "Positive"),
-    ("Loved the product it is well made and durable", "Positive"),
-    ("Highly satisfied with the purchase would definitely buy again", "Positive"),
-    ("The item looks great and works even better than expected", "Positive"),
-    ("So happy with this order the product is excellent", "Positive"),
-    ("Really nice product very good build quality", "Positive"),
-    ("This product is amazing I am completely in love with it", "Positive"),
-    ("Delighted with the purchase everything was perfect", "Positive"),
-    ("Awesome product arrived quickly and works perfectly", "Positive"),
-    ("The best product I have bought this year highly recommend", "Positive"),
-    ("Very well made item great quality very happy", "Positive"),
-    ("I enjoyed using this product it is very good", "Positive"),
-    ("Excellent item delivered on time great quality overall", "Positive"),
-
-    # ── NEGATIVE ─────────────────────────────
-    ("Terrible product broke after one day of use", "Negative"),
-    ("Very late delivery and the package was damaged", "Negative"),
-    ("Worst quality ever complete waste of money", "Negative"),
-    ("Customer service was rude and unhelpful never buying again", "Negative"),
-    ("Item was broken packaging was awful very disappointed", "Negative"),
-    ("Horrible experience product stopped working after two days", "Negative"),
-    ("Total waste of money do not buy this product", "Negative"),
-    ("Very disappointed the item does not work at all", "Negative"),
-    ("Damaged product received very poor packaging terrible service", "Negative"),
-    ("Worst purchase ever product quality is extremely poor", "Negative"),
-    ("Awful quality broke immediately extremely disappointed", "Negative"),
-    ("Terrible delivery took three weeks and arrived broken", "Negative"),
-    ("Do not buy this product it is a complete scam", "Negative"),
-    ("Very poor quality not worth the money at all", "Negative"),
-    ("Really bad product stopped working the very first day", "Negative"),
-    ("Disgusting quality product looks nothing like the picture", "Negative"),
-    ("Completely useless item waste of time and money", "Negative"),
-    ("Terrible customer service no refund given very upset", "Negative"),
-    ("Product arrived damaged and customer support ignored me", "Negative"),
-    ("Worst experience ever product is cheap and broken", "Negative"),
-    ("I hate this product it does not work properly", "Negative"),
-    ("Very bad quality returned it immediately", "Negative"),
-    ("Not at all satisfied with this product very poor", "Negative"),
-    ("Broken on arrival complete disappointment do not recommend", "Negative"),
-    ("Really terrible quality extremely unhappy with purchase", "Negative"),
-
-    # ── NEUTRAL ──────────────────────────────
-    ("Product is okay nothing special but does its job", "Neutral"),
-    ("Average quality for the price shipping was normal", "Neutral"),
-    ("It is fine not great not bad meets basic expectations", "Neutral"),
-    ("Decent product arrived on time packaging was acceptable", "Neutral"),
-    ("The item works as described standard quality nothing more", "Neutral"),
-    ("Product is alright it does what it is supposed to do", "Neutral"),
-    ("Neither good nor bad just an average product", "Neutral"),
-    ("Okay product nothing extraordinary about it", "Neutral"),
-    ("It does the job but nothing impressive about it", "Neutral"),
-    ("Average experience delivery was normal product is basic", "Neutral"),
-    ("Fairly standard product meets expectations nothing special", "Neutral"),
-    ("Product is usable but not outstanding in any way", "Neutral"),
-    ("It is an average item for an average price", "Neutral"),
-    ("Decent enough nothing to complain about but not great", "Neutral"),
-    ("Works fine for basic use not the best quality though", "Neutral"),
-]
-
-POSITIVE_WORDS = {
-    "excellent", "amazing", "love", "great", "best", "perfect",
-    "fantastic", "wonderful", "superb", "outstanding", "awesome",
-    "brilliant", "incredible", "happy", "delighted", "satisfied",
-    "good", "liked", "enjoy", "pleased", "nice", "impressed",
-}
-
-# ─────────────────────────────────────────────
-#  BUILD MODEL
+#  LOAD SAVED MODEL FILES  (from your notebook)
+#  Make sure sentiment_model.pkl and
+#  tfidf_vectorizer.pkl are in the same folder
+#  as app.py before running.
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def build_model():
-    """Train TF-IDF + Logistic Regression on expanded dataset."""
-    texts  = [r[0] for r in TRAIN_REVIEWS]
-    labels = [r[1] for r in TRAIN_REVIEWS]
-    tfidf_vec = TfidfVectorizer(
-        max_features=2000,
-        ngram_range=(1, 2),
-        sublinear_tf=True,
-    )
-    X = tfidf_vec.fit_transform(texts)
-    clf = LogisticRegression(max_iter=2000, C=1.5, random_state=42)
-    clf.fit(X, labels)
-    return tfidf_vec, clf
+def load_model_files():
+    """
+    Load the pkl files saved by your notebook:
+        pickle.dump(model, open('sentiment_model.pkl', 'wb'))
+        pickle.dump(tfidf, open('tfidf_vectorizer.pkl', 'wb'))
+    Falls back to a small in-memory model if pkl files are missing.
+    """
+    try:
+        trained_model = pickle.load(open("sentiment_model.pkl",    "rb"))
+        trained_tfidf = pickle.load(open("tfidf_vectorizer.pkl",   "rb"))
+        return trained_model, trained_tfidf, True          # True = loaded from pkl
+    except FileNotFoundError:
+        # ── Fallback demo model ───────────────────────────────────────────
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.linear_model import LogisticRegression
 
-tfidf, model = build_model()
+        DEMO = [
+            ("I absolutely love this product works perfectly arrived quickly", "Positive"),
+            ("Amazing quality exceeded all my expectations will buy again", "Positive"),
+            ("Great packaging fast shipping very happy with the purchase", "Positive"),
+            ("Excellent customer service resolved my issue immediately", "Positive"),
+            ("Perfect fit beautiful design highly recommend to everyone", "Positive"),
+            ("The product is very good and I really liked it", "Positive"),
+            ("This is really good I loved it so much", "Positive"),
+            ("Very good product I am really happy with it", "Positive"),
+            ("Absolutely fantastic product highly recommend it to everyone", "Positive"),
+            ("Best purchase I have ever made incredibly satisfied", "Positive"),
+            ("Superb quality product arrived on time very impressed", "Positive"),
+            ("Outstanding performance exceeded every expectation I had", "Positive"),
+            ("Wonderful product works exactly as described love it", "Positive"),
+            ("Really happy with this purchase great value for money", "Positive"),
+            ("Brilliant product very well made and delivered fast", "Positive"),
+            ("I love this item it is exactly what I wanted", "Positive"),
+            ("Incredible quality so satisfied with this purchase", "Positive"),
+            ("Great product very pleased with the quality and delivery", "Positive"),
+            ("Loved the product it is well made and durable", "Positive"),
+            ("Awesome product arrived quickly and works perfectly", "Positive"),
+            ("Terrible product broke after one day of use", "Negative"),
+            ("Very late delivery and the package was damaged", "Negative"),
+            ("Worst quality ever complete waste of money", "Negative"),
+            ("Customer service was rude and unhelpful never buying again", "Negative"),
+            ("Item was broken packaging was awful very disappointed", "Negative"),
+            ("Horrible experience product stopped working after two days", "Negative"),
+            ("Total waste of money do not buy this product", "Negative"),
+            ("Very disappointed the item does not work at all", "Negative"),
+            ("Damaged product received very poor packaging terrible service", "Negative"),
+            ("Worst purchase ever product quality is extremely poor", "Negative"),
+            ("Awful quality broke immediately extremely disappointed", "Negative"),
+            ("Do not buy this product it is a complete scam", "Negative"),
+            ("Very poor quality not worth the money at all", "Negative"),
+            ("Really bad product stopped working the very first day", "Negative"),
+            ("Completely useless item waste of time and money", "Negative"),
+            ("Terrible customer service no refund given very upset", "Negative"),
+            ("Product arrived damaged and customer support ignored me", "Negative"),
+            ("I hate this product it does not work properly", "Negative"),
+            ("Not at all satisfied with this product very poor", "Negative"),
+            ("Broken on arrival complete disappointment do not recommend", "Negative"),
+        ]
+        texts  = [d[0] for d in DEMO]
+        labels = [d[1] for d in DEMO]
+        tv = TfidfVectorizer(max_features=2000, ngram_range=(1, 2), sublinear_tf=True)
+        X  = tv.fit_transform(texts)
+        lr = LogisticRegression(max_iter=2000, C=1.5, random_state=42)
+        lr.fit(X, labels)
+        return lr, tv, False                               # False = demo fallback
+
+model, tfidf, using_pkl = load_model_files()
 
 # ─────────────────────────────────────────────
-#  CORE NLP FUNCTIONS
+#  POSITIVE WORDS LIST  (from your notebook)
 # ─────────────────────────────────────────────
-def clean_text(text: str) -> str:
-    """Preprocess raw review text."""
-    text  = text.lower()
-    text  = text.translate(str.maketrans("", "", string.punctuation))
-    text  = re.sub(r"\d+", "", text)
+positive_words = [
+    'amazing', 'excellent', 'perfect', 'awesome', 'great', 'best',
+    'fantastic', 'super', 'wonderful', 'brilliant', 'outstanding',
+    'incredible', 'nice', 'beautiful', 'love', 'liked', 'good',
+    'happy', 'satisfied', 'impressive', 'valuable', 'premium',
+    'fabulous', 'terrific', 'recommend', 'favorite', 'perfectly',
+    'fast', 'smooth',
+]
+
+# ─────────────────────────────────────────────
+#  YOUR EXACT FUNCTIONS FROM THE NOTEBOOK
+# ─────────────────────────────────────────────
+
+def clean_text(text):
+    """Exact copy of your notebook clean_text()."""
+
+    # Convert to lowercase
+    text = text.lower()
+
+    # Remove punctuation
+    text = text.translate(str.maketrans('', '', string.punctuation))
+
+    # Remove numbers
+    text = re.sub(r'\d+', '', text)
+
+    # Tokenization
     words = word_tokenize(text)
-    words = [w for w in words if w not in stop_words]
-    doc   = nlp(" ".join(words))
-    return " ".join([token.lemma_ for token in doc])
+
+    # Remove stopwords
+    words = [word for word in words if word not in stop_words]
+
+    # Lemmatization using spaCy
+    doc = nlp(" ".join(words))
+
+    clean_words = []
+
+    for token in doc:
+        clean_words.append(token.lemma_)
+
+    # Join words again
+    final_text = " ".join(clean_words)
+
+    return final_text
 
 
-def detect_fake_review(text: str) -> str:
-    """Heuristic fake-review detector."""
+def detect_fake_review(text):
+    """Exact copy of your notebook detect_fake_review()."""
+
     words = text.split()
+
+    # Rule 1: Very short review
     if len(words) < 3:
         return "Fake Review"
+
+    # Rule 2: Repeated words
     if len(set(words)) < len(words) / 2:
         return "Fake Review"
-    if sum(1 for w in words if w in POSITIVE_WORDS) >= 3:
+
+    # Rule 3: Too many positive words
+    count = 0
+
+    for word in words:
+        if word in positive_words:
+            count += 1
+
+    if count >= 3:
         return "Fake Review"
+
     return "Real Review"
 
 
-def classify_issue(text: str, sentiment: str) -> list:
-    """Detect issue categories from negative/neutral reviews."""
-    if sentiment == "Positive":
-        return ["No Issue"]
-    text   = text.lower()
+def classify_issue(text, sentiment):
+    """Exact copy of your notebook multi-issue classify_issue()."""
+
+    text = text.lower()
+
+    # Positive review
+    if sentiment == 'Positive':
+        return 'No Issue'
+
+    # Empty list to store issues
     issues = []
-    if any(k in text for k in ["delivery", "late", "shipping", "delay"]):
-        issues.append("Delivery")
-    if any(k in text for k in ["broken", "quality", "bad", "defect", "cheap"]):
-        issues.append("Product Quality")
-    if any(k in text for k in ["package", "packaging", "box", "wrap"]):
-        issues.append("Packaging")
-    if any(k in text for k in ["payment", "charge", "refund", "bill"]):
-        issues.append("Payment")
-    if any(k in text for k in ["support", "service", "customer", "rude", "helpful"]):
-        issues.append("Customer Service")
-    return issues if issues else ["No Issue"]
+
+    # Delivery issues
+    if 'delivery' in text or 'late' in text or 'shipping' in text:
+        issues.append('Delivery')
+
+    # Product quality issues
+    if 'broken' in text or 'quality' in text or 'bad' in text:
+        issues.append('Product Quality')
+
+    # Packaging issues
+    if 'package' in text or 'packaging' in text or 'box' in text:
+        issues.append('Packaging')
+
+    # Customer service issues
+    if 'support' in text or 'service' in text or 'customer' in text:
+        issues.append('Customer Service')
+
+    # If no issues found
+    if len(issues) == 0:
+        return 'No Issue'
+
+    # Return all issues
+    return ", ".join(issues)
 
 
-def predict_review(review: str) -> dict:
-    """Full prediction pipeline; returns a result dict."""
-    cleaned   = clean_text(review)
-    vector    = tfidf.transform([cleaned])
+def predict_review(review):
+    """Exact copy of your notebook predict_review() — returns dict for GUI."""
+
+    # Clean text
+    cleaned = clean_text(review)
+
+    # Convert to TF-IDF
+    vector = tfidf.transform([cleaned])
+
+    # Predict sentiment
     sentiment = model.predict(vector)[0]
-    fake      = detect_fake_review(cleaned)
-    issues    = classify_issue(cleaned, sentiment)
+
+    # Fake review detection
+    fake_status = detect_fake_review(cleaned)
+
+    # Issue classification
+    issue = classify_issue(cleaned, sentiment)
+
+    # Return as dict (GUI needs values, not print)
     return {
         "sentiment":   sentiment,
-        "fake_status": fake,
-        "issues":      issues,
+        "fake_status": fake_status,
+        "issue":       issue,
     }
 
 # ─────────────────────────────────────────────
@@ -233,12 +279,11 @@ def inject_css():
 
         html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
 
-        /* ── Page background: light slate ─── */
         .stApp { background: #f0f4f8; color: #1e293b; }
         #MainMenu, footer, header { visibility: hidden; }
         .block-container { padding: 0 2.5rem 4rem 2.5rem; max-width: 1100px; }
 
-        /* ── HERO BANNER ─────────────────── */
+        /* ── HERO ──────────────────────────── */
         .hero-banner {
             background: linear-gradient(120deg, #1e40af 0%, #2563eb 45%, #0ea5e9 100%);
             border-radius: 20px;
@@ -265,61 +310,51 @@ def inject_css():
         }
         .hero-eyebrow {
             font-family: 'Space Mono', monospace;
-            font-size: 0.68rem;
-            letter-spacing: 0.2em;
+            font-size: 0.68rem; letter-spacing: 0.2em;
             text-transform: uppercase;
             color: rgba(255,255,255,0.78);
             margin-bottom: 0.8rem;
         }
         .hero-title {
             font-size: clamp(1.7rem, 3.2vw, 2.7rem);
-            font-weight: 800;
-            color: #ffffff;
-            line-height: 1.15;
-            margin-bottom: 0.7rem;
+            font-weight: 800; color: #ffffff;
+            line-height: 1.15; margin-bottom: 0.7rem;
         }
         .hero-sub {
             font-size: 0.98rem;
             color: rgba(255,255,255,0.82);
-            max-width: 500px;
-            line-height: 1.65;
+            max-width: 500px; line-height: 1.65;
         }
         .hero-badges { display:flex; gap:0.55rem; flex-wrap:wrap; margin-top:1.6rem; }
         .badge {
-            font-size: 0.72rem;
-            font-weight: 600;
-            padding: 0.3rem 0.85rem;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.18);
-            color: #ffffff;
+            font-size: 0.72rem; font-weight: 600;
+            padding: 0.3rem 0.85rem; border-radius: 999px;
+            background: rgba(255,255,255,0.18); color: #ffffff;
             border: 1px solid rgba(255,255,255,0.28);
         }
 
-        /* ── SECTION HEADING ─────────────── */
-        .sec-heading {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            margin-bottom: 0.9rem;
+        /* ── MODEL SOURCE NOTICE ───────────── */
+        .model-notice {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            padding: 0.45rem 1rem; border-radius: 999px;
+            font-size: 0.78rem; font-weight: 600;
+            margin-bottom: 1.5rem;
         }
-        .sec-number {
-            width: 30px; height: 30px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #2563eb, #0ea5e9);
-            color: #fff;
-            font-size: 0.78rem;
-            font-weight: 700;
-            display: flex; align-items: center; justify-content: center;
-            flex-shrink: 0;
-            box-shadow: 0 3px 10px rgba(37,99,235,0.35);
-        }
-        .sec-title {
-            font-size: 1rem;
-            font-weight: 700;
-            color: #1e293b;
-        }
+        .notice-pkl  { background:#eff6ff; border:1.5px solid #93c5fd; color:#1d4ed8; }
+        .notice-demo { background:#fff7ed; border:1.5px solid #fdba74; color:#c2410c; }
 
-        /* ── WHITE ROUNDED CARD ──────────── */
+        /* ── SECTION HEADING ───────────────── */
+        .sec-heading { display:flex; align-items:center; gap:0.75rem; margin-bottom:0.9rem; }
+        .sec-number {
+            width:30px; height:30px; border-radius:50%;
+            background: linear-gradient(135deg,#2563eb,#0ea5e9);
+            color:#fff; font-size:0.78rem; font-weight:700;
+            display:flex; align-items:center; justify-content:center;
+            flex-shrink:0; box-shadow:0 3px 10px rgba(37,99,235,0.35);
+        }
+        .sec-title { font-size:1rem; font-weight:700; color:#1e293b; }
+
+        /* ── WHITE CARD ────────────────────── */
         .card {
             background: #ffffff;
             border: 1px solid #e2e8f0;
@@ -329,7 +364,7 @@ def inject_css():
             box-shadow: 0 2px 16px rgba(0,0,0,0.06);
         }
 
-        /* ── TEXTAREA ────────────────────── */
+        /* ── TEXTAREA ──────────────────────── */
         .stTextArea > div > div > textarea {
             background: #f8fafc !important;
             border: 1.5px solid #cbd5e1 !important;
@@ -346,78 +381,62 @@ def inject_css():
             box-shadow: 0 0 0 3px rgba(37,99,235,0.1) !important;
             background: #fff !important;
         }
-        .stTextArea > div > div > textarea::placeholder { color: #94a3b8 !important; }
+        .stTextArea > div > div > textarea::placeholder { color:#94a3b8 !important; }
 
-        /* ── BUTTONS ─────────────────────── */
+        /* ── BUTTONS ───────────────────────── */
         div[data-testid="column"] .stButton > button {
-            width: 100%;
-            border-radius: 10px;
-            font-family: 'Plus Jakarta Sans', sans-serif;
-            font-weight: 700;
-            font-size: 0.88rem;
-            padding: 0.65rem 1.2rem;
-            border: none;
-            cursor: pointer;
-            transition: all 0.22s ease;
+            width:100%; border-radius:10px;
+            font-family:'Plus Jakarta Sans',sans-serif;
+            font-weight:700; font-size:0.88rem;
+            padding:0.65rem 1.2rem; border:none;
+            cursor:pointer; transition:all 0.22s ease;
         }
         div[data-testid="column"]:nth-child(1) .stButton > button {
-            background: linear-gradient(135deg, #2563eb 0%, #0ea5e9 100%);
-            color: #ffffff;
-            box-shadow: 0 4px 16px rgba(37,99,235,0.3);
+            background: linear-gradient(135deg,#2563eb 0%,#0ea5e9 100%);
+            color:#ffffff; box-shadow:0 4px 16px rgba(37,99,235,0.3);
         }
         div[data-testid="column"]:nth-child(1) .stButton > button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(37,99,235,0.45);
+            transform:translateY(-2px);
+            box-shadow:0 8px 24px rgba(37,99,235,0.45);
         }
         div[data-testid="column"]:nth-child(2) .stButton > button {
-            background: #f1f5f9;
-            color: #64748b;
-            border: 1.5px solid #e2e8f0 !important;
+            background:#f1f5f9; color:#64748b;
+            border:1.5px solid #e2e8f0 !important;
         }
         div[data-testid="column"]:nth-child(2) .stButton > button:hover {
-            background: #e2e8f0;
-            color: #334155;
+            background:#e2e8f0; color:#334155;
         }
 
-        /* ── SENTIMENT ───────────────────── */
+        /* ── SENTIMENT ─────────────────────── */
         .sentiment-row { display:flex; align-items:center; gap:1.2rem; margin-bottom:0.5rem; }
-        .sent-emoji    { font-size:3rem; line-height:1; }
-        .sent-label    { font-size:2rem; font-weight:800; line-height:1; }
-        .sent-desc     { font-size:0.82rem; color:#64748b; margin-top:0.25rem; }
+        .sent-emoji { font-size:3rem; line-height:1; }
+        .sent-label { font-size:2rem; font-weight:800; line-height:1; }
+        .sent-desc  { font-size:0.82rem; color:#64748b; margin-top:0.25rem; }
 
-        /* ── AUTHENTICITY ────────────────── */
+        /* ── AUTHENTICITY ──────────────────── */
         .auth-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.45rem 1.1rem;
-            border-radius: 999px;
-            font-size: 0.85rem;
-            font-weight: 700;
-            margin-top: 0.3rem;
+            display:inline-flex; align-items:center; gap:0.5rem;
+            padding:0.45rem 1.1rem; border-radius:999px;
+            font-size:0.85rem; font-weight:700; margin-top:0.3rem;
         }
         .auth-real { background:#dcfce7; border:1.5px solid #86efac; color:#16a34a; }
         .auth-fake { background:#fee2e2; border:1.5px solid #fca5a5; color:#dc2626; }
         .auth-desc { font-size:0.78rem; color:#64748b; margin-top:0.6rem; line-height:1.5; }
 
-        /* ── ISSUE PILLS ─────────────────── */
+        /* ── ISSUE PILLS ───────────────────── */
         .issue-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-            padding: 0.42rem 1rem;
-            border-radius: 999px;
-            font-size: 0.82rem;
-            font-weight: 600;
-            margin: 0.25rem 0.25rem 0.25rem 0;
+            display:inline-flex; align-items:center; gap:0.4rem;
+            padding:0.42rem 1rem; border-radius:999px;
+            font-size:0.82rem; font-weight:600;
+            margin:0.25rem 0.25rem 0.25rem 0;
         }
         .pill-warn { background:#fff7ed; border:1.5px solid #fdba74; color:#ea580c; }
         .pill-ok   { background:#f0fdf4; border:1.5px solid #86efac; color:#16a34a; }
 
-        /* ── DIVIDER ─────────────────────── */
+        /* ── DIVIDER ───────────────────────── */
         .soft-divider { border:none; border-top:1.5px solid #e2e8f0; margin:1.6rem 0; }
 
-        /* ── SPINNER ─────────────────────── */
+        /* ── SPINNER ───────────────────────── */
         .stSpinner > div { border-top-color: #2563eb !important; }
         </style>
         """,
@@ -458,8 +477,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ── Model source notice ───────────────────────
+if using_pkl:
+    st.markdown(
+        '<div class="model-notice notice-pkl">✅ &nbsp; Using your trained model — <b>sentiment_model.pkl</b> + <b>tfidf_vectorizer.pkl</b> loaded successfully</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        '<div class="model-notice notice-demo">⚠️ &nbsp; PKL files not found — running with fallback demo model. Place <b>sentiment_model.pkl</b> &amp; <b>tfidf_vectorizer.pkl</b> next to app.py and restart.</div>',
+        unsafe_allow_html=True,
+    )
+
 # ─────────────────────────────────────────────
-#  SECTION 1 — INPUT  (inside rounded card)
+#  SECTION 1 — INPUT
 # ─────────────────────────────────────────────
 st.markdown(
     """
@@ -477,7 +508,7 @@ review_input = st.text_area(
     label="",
     value=st.session_state.review_text,
     height=160,
-    placeholder="Paste or type a customer review here…  e.g. 'The package arrived late and the product was completely broken. Very disappointed.'",
+    placeholder="Paste or type a customer review here…  e.g. 'The product quality is bad and delivery was late.'",
     key="review_area",
     label_visibility="collapsed",
 )
@@ -492,7 +523,7 @@ with col_btn2:
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Button logic ─────────────────────────────
+# ── Button logic ──────────────────────────────
 if clear_clicked:
     st.session_state.result      = None
     st.session_state.review_text = ""
@@ -505,8 +536,8 @@ if analyze_clicked:
     else:
         st.session_state.review_text = review_input
         with st.spinner("Analyzing review…"):
-            time.sleep(0.5)
-            result = predict_review(review_input)
+            time.sleep(0.4)
+            result = predict_review(review_input)   # your exact function
         st.session_state.result   = result
         st.session_state.analyzed = True
         st.rerun()
@@ -596,13 +627,17 @@ if st.session_state.analyzed and st.session_state.result:
         "No Issue":         "✅",
     }
 
+    # issue from your function is a comma-separated string e.g. "Delivery, Product Quality"
+    raw_issue  = r["issue"]
+    issue_list = [i.strip() for i in raw_issue.split(",")]
+
     pill_html = ""
-    for issue in r["issues"]:
+    for issue in issue_list:
         icon     = ISSUE_ICONS.get(issue, "⚠️")
         pill_cls = "pill-ok" if issue == "No Issue" else "pill-warn"
         pill_html += f'<span class="issue-pill {pill_cls}">{icon}&nbsp; {issue}</span>'
 
-    no_issue = r["issues"] == ["No Issue"]
+    no_issue = raw_issue == "No Issue"
     summary  = (
         "No specific issues were detected in this review."
         if no_issue else
@@ -627,7 +662,7 @@ st.markdown(
     <div style="margin-top:3rem;text-align:center;">
         <div style="font-family:'Space Mono',monospace;font-size:0.6rem;
                     letter-spacing:0.18em;text-transform:uppercase;color:#94a3b8;">
-            E-Commerce Review Intelligence System &nbsp;·&nbsp; NLP Demo Build
+            E-Commerce Review Intelligence System &nbsp;·&nbsp; NLP Pipeline
         </div>
     </div>
     """,
