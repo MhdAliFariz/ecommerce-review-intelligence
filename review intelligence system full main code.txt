@@ -1,0 +1,398 @@
+# Basic libraries
+import pandas as pd
+import numpy as np
+
+# Visualization libraries
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Text processing libraries
+import re
+import string
+import nltk
+import spacy
+
+# NLTK tools
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+
+# Machine learning libraries
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
+# WordCloud
+from wordcloud import WordCloud
+
+# Ignore warnings
+import warnings
+warnings.filterwarnings("ignore")
+
+# Download NLTK data
+nltk.download('punkt')
+nltk.download('stopwords')
+
+# Load spaCy English model
+# Run this command first if model is missing:
+# python -m spacy download en_core_web_sm
+
+nlp = spacy.load("en_core_web_sm")
+
+print("Libraries imported successfully")
+# Load Amazon review dataset
+
+# Dataset file name
+file_name = "train.ft.txt.bz2"
+
+# Load only first 100000 rows
+data = pd.read_csv(
+    file_name,
+    compression='bz2',
+    sep='\t',
+    header=None,
+    names=['review'],
+    nrows=100000
+)
+
+print("Dataset Loaded Successfully")
+
+# Show first 5 rows
+print(data.head())
+
+# Show dataset shape
+print("Dataset Shape:", data.shape)
+# Extract labels
+data['label'] = data['review'].apply(lambda x: x.split(' ')[0])
+
+# Extract review text
+data['text'] = data['review'].apply(lambda x: ' '.join(x.split(' ')[1:]))
+
+# Show data
+data[['label', 'text']].head()
+# Convert labels
+
+def sentiment_label(x):
+    
+    if x == '__label__2':
+        return 'Positive'
+    else:
+        return 'Negative'
+
+data['sentiment'] = data['label'].apply(sentiment_label)
+
+# Check sentiment counts
+data['sentiment'].value_counts()
+# Stopwords
+stop_words = set(stopwords.words('english'))
+
+# Text cleaning function
+def clean_text(text):
+    
+    # Convert to lowercase
+    text = text.lower()
+    
+    # Remove punctuation
+    text = text.translate(str.maketrans('', '', string.punctuation))
+    
+    # Remove numbers
+    text = re.sub(r'\\d+', '', text)
+    
+    # Tokenization
+    words = word_tokenize(text)
+    
+    # Remove stopwords
+    words = [word for word in words if word not in stop_words]
+    
+    # Lemmatization using spaCy
+    doc = nlp(" ".join(words))
+    
+    clean_words = []
+    
+    for token in doc:
+        clean_words.append(token.lemma_)
+    
+    # Join words again
+    final_text = " ".join(clean_words)
+    
+    return final_text
+# Apply cleaning
+
+data['clean_text'] = data['text'].apply(clean_text)
+
+# Show cleaned text
+data[['text', 'clean_text']].head()
+
+# Sentiment count plot
+
+plt.figure(figsize=(6,4))
+
+sns.countplot(x=data['sentiment'])
+
+plt.title("Sentiment Distribution")
+
+plt.show()
+# Review length
+
+data['review_length'] = data['clean_text'].apply(len)
+
+plt.figure(figsize=(8,5))
+
+sns.histplot(data['review_length'], bins=30)
+
+plt.title("Review Length Distribution")
+
+plt.show()
+# WordCloud
+
+all_words = " ".join(data['clean_text'])
+
+wordcloud = WordCloud(
+    width=800,
+    height=400,
+    background_color='white'
+).generate(all_words)
+
+plt.figure(figsize=(12,6))
+
+plt.imshow(wordcloud)
+
+plt.axis('off')
+
+plt.title("Most Common Words")
+
+plt.show()
+
+# TF-IDF vectorizer
+
+tfidf = TfidfVectorizer(max_features=10000)
+
+# Features
+X = tfidf.fit_transform(data['clean_text'])
+
+# Target
+y = data['sentiment']
+
+print("TF-IDF Shape:", X.shape)
+
+# Split dataset
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42
+)
+
+print("Training Data:", X_train.shape)
+print("Testing Data:", X_test.shape)
+
+# Create model
+
+model = LogisticRegression()
+
+# Train model
+model.fit(X_train, y_train)
+
+print("Model training completed")
+
+# Predictions
+
+y_pred = model.predict(X_test)
+
+# Accuracy
+accuracy = accuracy_score(y_test, y_pred)
+
+print("Accuracy:", accuracy)
+
+# Classification report
+
+print(classification_report(y_test, y_pred))
+
+# Confusion matrix
+
+cm = confusion_matrix(y_test, y_pred)
+
+plt.figure(figsize=(6,4))
+
+sns.heatmap(cm, annot=True, fmt='d')
+
+plt.title("Confusion Matrix")
+
+plt.xlabel("Predicted")
+
+plt.ylabel("Actual")
+
+plt.show()
+
+# Positive words list
+
+positive_words = [
+
+    'amazing',
+    'excellent',
+    'perfect',
+    'awesome',
+    'great',
+    'best',
+    'fantastic',
+    'super',
+    'wonderful',
+    'brilliant',
+    'outstanding',
+    'incredible',
+    'nice',
+    'beautiful',
+    'love',
+    'liked',
+    'good',
+    'happy',
+    'satisfied',
+    'impressive',
+    'valuable',
+    'premium',
+    'fabulous',
+    'terrific',
+    'excellent',
+    'recommend',
+    'favorite',
+    'perfectly',
+    'fast',
+    'smooth'
+]
+
+# Fake review detection function
+
+def detect_fake_review(text):
+    
+    words = text.split()
+    
+    # Rule 1: Very short review
+    if len(words) < 3:
+        return "Fake Review"
+    
+    # Rule 2: Repeated words
+    if len(set(words)) < len(words) / 2:
+        return "Fake Review"
+    
+    # Rule 3: Too many positive words
+    count = 0
+    
+    for word in words:
+        if word in positive_words:
+            count += 1
+    
+    if count >= 3:
+        return "Fake Review"
+    
+    return "Real Review"
+# Apply fake review detection
+
+data['fake_review'] = data['clean_text'].apply(detect_fake_review)
+
+# Show results
+data[['clean_text', 'fake_review']].head()
+
+
+# Issue classification function
+
+# Better issue classification function
+
+# Issue classification function
+# Multi-issue classification function
+
+def classify_issue(text, sentiment):
+
+    text = text.lower()
+
+    # Positive review
+    if sentiment == 'Positive':
+        return 'No Issue'
+
+    # Empty list to store issues
+    issues = []
+
+    # Delivery issues
+    if 'delivery' in text or 'late' in text or 'shipping' in text:
+        issues.append('Delivery')
+
+    # Product quality issues
+    if 'broken' in text or 'quality' in text or 'bad' in text:
+        issues.append('Product Quality')
+
+    # Packaging issues
+    if 'package' in text or 'packaging' in text or 'box' in text:
+        issues.append('Packaging')
+
+    # Customer service issues
+    if 'support' in text or 'service' in text or 'customer' in text:
+        issues.append('Customer Service')
+
+    # If no issues found
+    if len(issues) == 0:
+        return 'No Issue'
+
+    # Return all issues
+    return ", ".join(issues)
+
+# Apply issue classification
+
+data['issue_category'] = data.apply(
+    
+    lambda row: classify_issue(
+        row['clean_text'],
+        row['sentiment']
+    ),
+    
+    axis=1
+)
+
+# Display results in table format
+
+data[
+    ['clean_text', 'sentiment', 'issue_category']
+].head(10)
+
+# Final prediction function
+
+def predict_review(review):
+    
+    # Clean text
+    cleaned = clean_text(review)
+    
+    # Convert to TF-IDF
+    vector = tfidf.transform([cleaned])
+    
+    # Predict sentiment
+    sentiment = model.predict(vector)[0]
+    
+    # Fake review detection
+    fake_status = detect_fake_review(cleaned)
+    
+    # Issue classification
+    issue = classify_issue(cleaned, sentiment)
+    
+    # Print results
+    print("Review:", review)
+    print("")
+    print("Predicted Sentiment:", sentiment)
+    print("Fake Review Status:", fake_status)
+    print("Issue Category:", issue)
+# Test prediction
+
+sample_review = "The product quality is bad and delivery was late"
+
+predict_review(sample_review)
+
+# Save model and vectorizer
+
+import pickle
+
+# Save model
+pickle.dump(model, open('sentiment_model.pkl', 'wb'))
+
+# Save TF-IDF vectorizer
+pickle.dump(tfidf, open('tfidf_vectorizer.pkl', 'wb'))
+
+print("Model files saved")
+
